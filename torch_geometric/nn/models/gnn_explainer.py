@@ -203,6 +203,7 @@ class GNNExplainer(torch.nn.Module):
         # Get the initial prediction.
         with torch.no_grad():
             out = self.model(x=x, edge_index=edge_index, batch=batch, **kwargs)
+            init_out = out
             if self.return_type == 'regression':
                 prediction = out
             else:
@@ -243,7 +244,7 @@ class GNNExplainer(torch.nn.Module):
         edge_mask = self.edge_mask.detach().sigmoid()
 
         self.__clear_masks__()
-        return node_feat_mask, edge_mask
+        return node_feat_mask, edge_mask, init_out
 
     def explain_node(self, node_idx, x, edge_index, **kwargs):
         r"""Learns and returns a node feature mask and an edge mask that play a
@@ -272,6 +273,7 @@ class GNNExplainer(torch.nn.Module):
         # Get the initial prediction.
         with torch.no_grad():
             out = self.model(x=x, edge_index=edge_index, **kwargs)
+            init_out = out
             if self.return_type == 'regression':
                 prediction = out
             else:
@@ -325,7 +327,7 @@ class GNNExplainer(torch.nn.Module):
 
         self.__clear_masks__()
 
-        return node_feat_mask, edge_mask
+        return node_feat_mask, edge_mask, init_out
 
     def visualize_subgraph(self, node_idx, edge_index, edge_mask, y=None,
                            threshold=None, edge_y=None, node_alpha=None,
