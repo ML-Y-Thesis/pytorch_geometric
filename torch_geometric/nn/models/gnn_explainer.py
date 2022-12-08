@@ -94,6 +94,7 @@ class GNNExplainer(torch.nn.Module):
             self.node_feat_mask = torch.nn.Parameter(torch.randn(1, F) * std)
 
         std = torch.nn.init.calculate_gain('relu') * sqrt(2.0 / (2 * N))
+        torch.manual_seed(1234) # in order to get reproducible results
         self.edge_mask = torch.nn.Parameter(torch.randn(E) * std)
         if not self.allow_edge_mask:
             self.edge_mask.requires_grad_(False)
@@ -112,7 +113,7 @@ class GNNExplainer(torch.nn.Module):
                 module.__explain__ = False
                 module.__edge_mask__ = None
                 module.__loop_mask__ = None
-        self.node_feat_masks = None
+        self.node_feat_mask = None #TODO previously self.node_feat_masks --> typo??
         self.edge_mask = None
         module.loop_mask = None
 
@@ -150,7 +151,7 @@ class GNNExplainer(torch.nn.Module):
 
         return x, edge_index, mapping, edge_mask, subset, kwargs
 
-    def __loss__(self, node_idx, log_logits, pred_label):
+    def __loss__(self, node_idx, log_logits, pred_label, binary):
         # node_idx is -1 for explaining graphs
         if self.return_type == 'regression':
             if node_idx != -1:
@@ -161,13 +162,17 @@ class GNNExplainer(torch.nn.Module):
             if node_idx != -1:
                 loss = -log_logits[node_idx, pred_label[node_idx]]
             else:
-                loss = -log_logits[0, pred_label[0]]
+                if binary:
+                    loss = log_logits  
+                else:
+                    loss = -log_logits[0, pred_label[0]] ## not sensible when only using one output node? then the output of the model is always force to be 1 even if it is class 0??
 
-        m = self.edge_mask.sigmoid()
-        edge_reduce = getattr(torch, self.coeffs['edge_reduction'])
-        loss = loss + self.coeffs['edge_size'] * edge_reduce(m)
-        ent = -m * torch.log(m + EPS) - (1 - m) * torch.log(1 - m + EPS)
-        loss = loss + self.coeffs['edge_ent'] * ent.mean()
+        if self.allow_edge_mask:
+            m = self.edge_mask.sigmoid()
+            edge_reduce = getattr(torch, self.coeffs['edge_reduction'])
+            loss = loss + self.coeffs['edge_size'] * edge_reduce(m)
+            ent = -m * torch.log(m + EPS) - (1 - m) * torch.log(1 - m + EPS)
+            loss = loss + self.coeffs['edge_ent'] * ent.mean()
 
         m = self.node_feat_mask.sigmoid()
         node_feat_reduce = getattr(torch, self.coeffs['node_feat_reduction'])
@@ -182,7 +187,8 @@ class GNNExplainer(torch.nn.Module):
         x = x.log() if self.return_type == 'prob' else x
         return x
 
-    def explain_graph(self, x, edge_index, **kwargs):
+    def explain_graph(self, x, edge_index, batch, binary, **kwargs):
+
         r"""Learns and returns a node feature mask and an edge mask that play a
         crucial role to explain the prediction made by the GNN for a graph.
 
@@ -198,17 +204,20 @@ class GNNExplainer(torch.nn.Module):
         self.__clear_masks__()
 
         # all nodes belong to same graph
-        batch = torch.zeros(x.shape[0], dtype=int, device=x.device)
+        # batch = torch.zeros(x.shape[0], dtype=int, device=x.device)
 
         # Get the initial prediction.
         with torch.no_grad():
-            out = self.model(x=x, edge_index=edge_index, batch=batch, **kwargs)
+            out = self.model(batch, **kwargs) 
             init_out = out
             if self.return_type == 'regression':
                 prediction = out
             else:
-                log_logits = self.__to_log_prob__(out)
-                pred_label = log_logits.argmax(dim=-1)
+                if binary: 
+                    pred_label = 1 if out >= 0.5 else 0
+                else:
+                    log_logits = self.__to_log_prob__(out)
+                    pred_label = log_logits.argmax(dim=-1)
 
         self.__set_masks__(x, edge_index)
         self.to(x.device)
@@ -225,12 +234,17 @@ class GNNExplainer(torch.nn.Module):
         for epoch in range(1, self.epochs + 1):
             optimizer.zero_grad()
             h = x * self.node_feat_mask.sigmoid()
-            out = self.model(x=h, edge_index=edge_index, batch=batch, **kwargs)
+            out = self.model(x=h, batch=batch, **kwargs)
             if self.return_type == 'regression':
                 loss = self.__loss__(-1, out, prediction)
             else:
-                log_logits = self.__to_log_prob__(out)
-                loss = self.__loss__(-1, log_logits, pred_label)
+                if binary:
+                    log_logits = -pred_label*self.__to_log_prob__(out)[0,0]-(1-pred_label)*self.__to_log_prob__(1-out)[0,0] #actually already the prediction loss and not the log_logits
+                    loss = self.__loss__(-1, log_logits, pred_label, binary=binary)
+                else:
+                    log_logits = self.__to_log_prob__(out)
+                    loss = self.__loss__(-1, log_logits, pred_label, binary=binary)
+
             loss.backward()
             optimizer.step()
 
